@@ -2,6 +2,15 @@ import { useEffect, useState, useRef } from 'react';
 import { message, dryrun } from '@permaweb/aoconnect';
 import { motion, AnimatePresence } from 'framer-motion';
 import "./App.css";
+// import "./index.css";
+import flvjs from 'flv.js';
+
+// Extend the HTMLVideoElement interface
+interface ExtendedHTMLVideoElement extends HTMLVideoElement {
+  srcObject: MediaStream | null;
+}
+
+// Extend the Window interface
 declare global {
   interface Window {
     arweaveWallet: {
@@ -43,7 +52,8 @@ interface ChatMessage {
 interface StreamSetup {
   title: string;
   category: string;
-  source: 'screen' | 'camera';
+  source: 'obs' | 'camera' | 'screen';
+  rtmpKey?: string;
 }
 
 export default function App() {
@@ -58,16 +68,19 @@ export default function App() {
   const [streamSetup, setStreamSetup] = useState<StreamSetup>({
     title: '',
     category: '',
-    source: 'camera'
+    source: 'camera',
+    rtmpKey: ''
   });
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const processId = 'uKz_4QN_kKDOJBjv8W1D_4EWZezv-g1pNzRJj6aITI0';
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoRef = useRef<ExtendedHTMLVideoElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [volume, setVolume] = useState(1);
   const [showControls, setShowControls] = useState(true);
   const controlsTimeout = useRef<NodeJS.Timeout>();
+  const flvPlayerRef = useRef<flvjs.Player | null>(null);
+  const [count, setCount] = useState(0);
 
   const connectWallet = async () => {
     try {
@@ -84,12 +97,41 @@ export default function App() {
     }
   };
 
+  const generateRTMPKey = () => {
+    const key = Math.random().toString(36).substring(2, 15);
+    setStreamSetup({...streamSetup, rtmpKey: key});
+    return key;
+  };
+
+  const getRTMPUrl = (key: string) => {
+    // Update this to your server's IP or domain
+    return `rtmp://localhost:1935/live/${key}`;
+  };
+
+  const getHLSUrl = (key: string) => {
+    // HLS URL for playback
+    return `http://localhost:8000/live/${key}.flv`;
+  };
+
   const handleGoLive = async () => {
     if (!walletAddress) {
       alert('Please connect your wallet first');
       return;
     }
-    setShowStreamSetup(true);
+    if (streamSetup.source === 'obs') {
+      const key = generateRTMPKey();
+      setShowStreamSetup(true);
+      // Show OBS setup instructions
+      alert(`OBS Setup Instructions:
+1. Open OBS
+2. Go to Settings > Stream
+3. Set Service to 'Custom'
+4. Server: ${getRTMPUrl(key)}
+5. Stream Key: ${key}
+6. Click OK and Start Streaming`);
+    } else {
+      setShowStreamSetup(true);
+    }
   };
 
   const startStreaming = async () => {
@@ -136,7 +178,36 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (isStreaming && streamSetup.source === 'obs' && streamSetup.rtmpKey) {
+      if (flvjs.isSupported()) {
+        const videoElement = videoRef.current;
+        if (videoElement) {
+          flvPlayerRef.current = flvjs.createPlayer({
+            type: 'flv',
+            url: getHLSUrl(streamSetup.rtmpKey),
+            isLive: true
+          });
+          flvPlayerRef.current.attachMediaElement(videoElement);
+          flvPlayerRef.current.load();
+          flvPlayerRef.current.play();
+        }
+      }
+    }
+
+    return () => {
+      if (flvPlayerRef.current) {
+        flvPlayerRef.current.destroy();
+        flvPlayerRef.current = null;
+      }
+    };
+  }, [isStreaming, streamSetup.rtmpKey]);
+
   const stopStreaming = async () => {
+    if (flvPlayerRef.current) {
+      flvPlayerRef.current.destroy();
+      flvPlayerRef.current = null;
+    }
     if (mediaStream) {
       mediaStream.getTracks().forEach(track => track.stop());
       setMediaStream(null);
@@ -260,21 +331,21 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-black text-white">
-      <nav className="bg-gray-900 border-b border-gray-800 p-4">
+    <div className="min-h-screen bg-black text-white font-mono">
+      <nav className="bg-black border-b border-white/10 p-4">
         <div className="container mx-auto flex justify-between items-center">
           <h1 className="text-2xl font-bold text-white">LiveStream Platform</h1>
           <div className="flex space-x-4 items-center">
             {walletAddress ? (
               <div className="flex items-center space-x-2">
-                <span className="text-sm bg-gray-800 text-white px-3 py-1 rounded border border-gray-700">
+                <span className="text-sm bg-black text-white px-3 py-1 rounded border border-white/20">
                   {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
                 </span>
               </div>
             ) : (
               <button 
                 onClick={connectWallet}
-                className="bg-white text-black hover:bg-gray-200 px-4 py-2 rounded font-medium transition-colors"
+                className="bg-white text-black hover:bg-gray-200 px-4 py-2 rounded font-mono transition-colors"
               >
                 Connect Wallet
               </button>
@@ -282,19 +353,19 @@ export default function App() {
             {isStreaming ? (
               <button 
                 onClick={stopStreaming}
-                className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded font-medium transition-colors"
+                className="bg-white text-black hover:bg-gray-200 px-4 py-2 rounded font-mono transition-colors"
               >
                 Stop Streaming
               </button>
             ) : (
               <button 
                 onClick={handleGoLive}
-                className="bg-white text-black hover:bg-gray-200 px-4 py-2 rounded font-medium transition-colors"
+                className="bg-white text-black hover:bg-gray-200 px-4 py-2 rounded font-mono transition-colors"
               >
                 Go Live
               </button>
             )}
-            <button className="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded font-medium transition-colors border border-gray-700">
+            <button className="bg-black text-white px-4 py-2 rounded font-mono transition-colors border border-white/20 hover:border-white/40">
               Browse
             </button>
           </div>
@@ -302,51 +373,66 @@ export default function App() {
       </nav>
 
       {showStreamSetup && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center">
-          <div className="bg-gray-900 p-6 rounded-lg w-96 border border-gray-800">
-            <h2 className="text-xl font-bold mb-4 text-white">Stream Setup</h2>
+        <div className="fixed inset-0 bg-black/90 flex items-center justify-center">
+          <div className="bg-black p-6 rounded-lg w-96 border border-white/20">
+            <h2 className="text-xl font-bold mb-4 text-white font-mono">Stream Setup</h2>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium mb-1 text-gray-300">Title</label>
+                <label className="block text-sm font-medium mb-1 text-white/70 font-mono">Title</label>
                 <input
                   type="text"
                   value={streamSetup.title}
                   onChange={(e) => setStreamSetup({...streamSetup, title: e.target.value})}
-                  className="w-full bg-gray-800 text-white rounded px-3 py-2 border border-gray-700 focus:border-white focus:ring-1 focus:ring-white"
+                  className="w-full bg-black text-white rounded px-3 py-2 border border-white/20 focus:border-white focus:ring-1 focus:ring-white font-mono"
                   placeholder="Enter stream title"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1 text-gray-300">Category</label>
+                <label className="block text-sm font-medium mb-1 text-white/70 font-mono">Category</label>
                 <input
                   type="text"
                   value={streamSetup.category}
                   onChange={(e) => setStreamSetup({...streamSetup, category: e.target.value})}
-                  className="w-full bg-gray-800 text-white rounded px-3 py-2 border border-gray-700 focus:border-white focus:ring-1 focus:ring-white"
+                  className="w-full bg-black text-white rounded px-3 py-2 border border-white/20 focus:border-white focus:ring-1 focus:ring-white font-mono"
                   placeholder="Enter category"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1 text-gray-300">Source</label>
+                <label className="block text-sm font-medium mb-1 text-white/70 font-mono">Source</label>
                 <select
                   value={streamSetup.source}
-                  onChange={(e) => setStreamSetup({...streamSetup, source: e.target.value as 'screen' | 'camera'})}
-                  className="w-full bg-gray-800 text-white rounded px-3 py-2 border border-gray-700 focus:border-white focus:ring-1 focus:ring-white"
+                  onChange={(e) => setStreamSetup({...streamSetup, source: e.target.value as 'obs' | 'camera' | 'screen'})}
+                  className="w-full bg-black text-white rounded px-3 py-2 border border-white/20 focus:border-white focus:ring-1 focus:ring-white font-mono"
                 >
                   <option value="camera">Camera</option>
                   <option value="screen">Screen Share</option>
+                  <option value="obs">OBS Studio</option>
                 </select>
               </div>
+              {streamSetup.source === 'obs' && streamSetup.rtmpKey && (
+                <div className="bg-black/50 p-4 rounded border border-white/20">
+                  <h3 className="text-sm font-mono mb-2">OBS Setup</h3>
+                  <p className="text-xs text-white/70 font-mono mb-2">Server: {getRTMPUrl(streamSetup.rtmpKey)}</p>
+                  <p className="text-xs text-white/70 font-mono">Stream Key: {streamSetup.rtmpKey}</p>
+                  <div className="mt-2 text-xs text-white/50 font-mono">
+                    <p>1. Open OBS</p>
+                    <p>2. Go to Settings &gt; Stream</p>
+                    <p>3. Set Service to 'Custom'</p>
+                    <p>4. Enter the Server and Stream Key above</p>
+                    <p>5. Click OK and Start Streaming</p>
+                  </div>
+                </div>
+              )}
               <div className="flex justify-end space-x-2">
                 <button
                   onClick={() => setShowStreamSetup(false)}
-                  className="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded font-medium transition-colors border border-gray-700"
+                  className="bg-black text-white px-4 py-2 rounded font-mono transition-colors border border-white/20 hover:border-white/40"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={startStreaming}
-                  className="bg-white text-black hover:bg-gray-200 px-4 py-2 rounded font-medium transition-colors"
+                  className="bg-white text-black hover:bg-gray-200 px-4 py-2 rounded font-mono transition-colors"
                 >
                   Start Streaming
                 </button>
@@ -359,19 +445,19 @@ export default function App() {
       {isStreaming && mediaStream && (
         <div className="container mx-auto p-4">
           <div 
-            className="relative bg-black rounded-lg overflow-hidden border border-gray-800"
+            className="relative bg-black rounded-lg overflow-hidden border border-white/20"
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setShowControls(false)}
           >
             <video
               ref={videoRef}
+              // @ts-ignore - srcObject is a valid property but TypeScript doesn't recognize it
               srcObject={mediaStream}
               autoPlay
               muted={isMuted}
               className="w-full"
             />
             
-            {/* Video Controls */}
             <div 
               className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent p-4 transition-opacity duration-300 ${
                 showControls ? 'opacity-100' : 'opacity-0'
@@ -379,10 +465,9 @@ export default function App() {
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-4">
-                  {/* Volume Controls */}
                   <button 
                     onClick={toggleMute}
-                    className="text-white hover:text-gray-300 transition-colors"
+                    className="text-white hover:text-white/70 transition-colors"
                   >
                     {isMuted ? (
                       <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -402,14 +487,13 @@ export default function App() {
                     step="0.01"
                     value={volume}
                     onChange={handleVolumeChange}
-                    className="w-24 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
+                    className="w-24 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
                   />
                 </div>
                 
-                {/* Fullscreen Button */}
                 <button 
                   onClick={toggleFullscreen}
-                  className="text-white hover:text-gray-300 transition-colors"
+                  className="text-white hover:text-white/70 transition-colors"
                 >
                   {isFullscreen ? (
                     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
