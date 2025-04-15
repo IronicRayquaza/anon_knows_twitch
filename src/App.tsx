@@ -52,8 +52,19 @@ interface ChatMessage {
 interface StreamSetup {
   title: string;
   category: string;
-  source: 'obs' | 'camera' | 'screen';
   rtmpKey?: string;
+}
+
+interface ArweaveWallet {
+  connect: (permissions: string[]) => Promise<void>;
+  getActiveAddress: () => Promise<string>;
+  signTransaction: (tx: any) => Promise<any>;
+}
+
+declare global {
+  interface Window {
+    arweaveWallet: ArweaveWallet;
+  }
 }
 
 export default function App() {
@@ -68,7 +79,6 @@ export default function App() {
   const [streamSetup, setStreamSetup] = useState<StreamSetup>({
     title: '',
     category: '',
-    source: 'camera',
     rtmpKey: ''
   });
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
@@ -81,6 +91,15 @@ export default function App() {
   const controlsTimeout = useRef<NodeJS.Timeout>();
   const flvPlayerRef = useRef<flvjs.Player | null>(null);
   const [count, setCount] = useState(0);
+  const [error, setError] = useState('');
+
+  // Add useEffect for wallet persistence
+  useEffect(() => {
+    const savedWalletAddress = localStorage.getItem('walletAddress');
+    if (savedWalletAddress) {
+      setWalletAddress(savedWalletAddress);
+    }
+  }, []);
 
   const connectWallet = async () => {
     try {
@@ -88,12 +107,31 @@ export default function App() {
         await window.arweaveWallet.connect(['ACCESS_ADDRESS', 'SIGN_TRANSACTION']);
         const address = await window.arweaveWallet.getActiveAddress();
         setWalletAddress(address);
+        // Save wallet address to localStorage
+        localStorage.setItem('walletAddress', address);
       } else {
         alert('Please install Arweave Wallet extension');
       }
     } catch (error) {
       console.error('Error connecting wallet:', error);
       alert('Failed to connect wallet');
+    }
+  };
+
+  const disconnectWallet = async () => {
+    try {
+      // Clear wallet address from state and localStorage
+      setWalletAddress(null);
+      localStorage.removeItem('walletAddress');
+      // Reset streaming state
+      setIsStreaming(false);
+      setShowStreamSetup(false);
+      if (flvPlayerRef.current) {
+        flvPlayerRef.current.destroy();
+        flvPlayerRef.current = null;
+      }
+    } catch (error) {
+      console.error('Error disconnecting wallet:', error);
     }
   };
 
@@ -110,7 +148,7 @@ export default function App() {
 
   const getHLSUrl = (key: string) => {
     // HLS URL for playback
-    return `http://localhost:8000/live/${key}.flv`;
+    return `http://localhost:8000/live/${key}/index.m3u8`;
   };
 
   const handleGoLive = async () => {
@@ -118,80 +156,95 @@ export default function App() {
       alert('Please connect your wallet first');
       return;
     }
-    if (streamSetup.source === 'obs') {
-      const key = generateRTMPKey();
-      setShowStreamSetup(true);
-      // Show OBS setup instructions
-      alert(`OBS Setup Instructions:
-1. Open OBS
-2. Go to Settings > Stream
-3. Set Service to 'Custom'
-4. Server: ${getRTMPUrl(key)}
-5. Stream Key: ${key}
-6. Click OK and Start Streaming`);
-    } else {
-      setShowStreamSetup(true);
-    }
+    const key = generateRTMPKey();
+    setShowStreamSetup(true);
   };
 
   const startStreaming = async () => {
     try {
-      let stream: MediaStream;
-      
-      if (streamSetup.source === 'screen') {
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true
-        });
-      } else {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true
-        });
+      if (!streamSetup.rtmpKey) {
+        setError('Please enter a stream key');
+        return;
       }
 
-      setMediaStream(stream);
-      setIsStreaming(true);
-      setShowStreamSetup(false);
-
-      // Create transaction for starting stream
-      const tx = {
-        data: JSON.stringify({
-          action: 'StartStream',
-          title: streamSetup.title,
-          category: streamSetup.category,
-          source: streamSetup.source
-        })
-      };
-
-      // Sign and send transaction
-      const signedTx = await window.arweaveWallet.signTransaction(tx);
-      await message({
-        process: processId,
-        tags: [{ name: 'Action', value: 'StartStream' }],
-        data: signedTx
+      // Start local stream
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true
       });
 
-    } catch (error) {
-      console.error('Error starting stream:', error);
-      alert('Failed to start stream');
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+
+      // Start RTMP stream
+      const rtmpUrl = `rtmp://localhost:1935/live/${streamSetup.rtmpKey}`;
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'video/webm;codecs=h264'
+      });
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          // Send data to RTMP server
+          const socket = new WebSocket('ws://localhost:8000/live');
+          socket.onopen = () => {
+            socket.send(e.data);
+          };
+        }
+      };
+
+      mediaRecorder.start(1000);
+      setIsStreaming(true);
+      setError('');
+    } catch (err) {
+      console.error('Error starting stream:', err);
+      setError('Failed to start stream. Please check your camera and microphone permissions.');
     }
   };
 
   useEffect(() => {
-    if (isStreaming && streamSetup.source === 'obs' && streamSetup.rtmpKey) {
+    if (isStreaming && streamSetup.rtmpKey) {
       if (flvjs.isSupported()) {
         const videoElement = videoRef.current;
         if (videoElement) {
-          flvPlayerRef.current = flvjs.createPlayer({
+          const flvPlayer = flvjs.createPlayer({
             type: 'flv',
             url: getHLSUrl(streamSetup.rtmpKey),
-            isLive: true
+            isLive: true,
+            hasAudio: true,
+            hasVideo: true,
+            cors: true
           });
-          flvPlayerRef.current.attachMediaElement(videoElement);
-          flvPlayerRef.current.load();
-          flvPlayerRef.current.play();
+          
+          flvPlayer.on(flvjs.Events.ERROR, (errType: string, errDetail: any) => {
+            console.error('FLV Player Error:', errType, errDetail);
+            // Try to reconnect after error
+            setTimeout(() => {
+              if (flvPlayer) {
+                flvPlayer.unload();
+                flvPlayer.load();
+              }
+            }, 5000);
+          });
+
+          flvPlayer.on(flvjs.Events.LOADING_COMPLETE, () => {
+            console.log('FLV Player Loading Complete');
+          });
+
+          flvPlayer.attachMediaElement(videoElement);
+          flvPlayer.load();
+          
+          const playPromise = flvPlayer.play();
+          if (playPromise !== undefined) {
+            playPromise.catch((error: Error) => {
+              console.error('Error playing stream:', error);
+            });
+          }
+
+          flvPlayerRef.current = flvPlayer;
         }
+      } else {
+        console.error('FLV.js is not supported in this browser');
       }
     }
 
@@ -203,71 +256,48 @@ export default function App() {
     };
   }, [isStreaming, streamSetup.rtmpKey]);
 
-  const stopStreaming = async () => {
-    if (flvPlayerRef.current) {
-      flvPlayerRef.current.destroy();
-      flvPlayerRef.current = null;
-    }
-    if (mediaStream) {
-      mediaStream.getTracks().forEach(track => track.stop());
-      setMediaStream(null);
-    }
-    setIsStreaming(false);
-
-    // Create transaction for stopping stream
-    const tx = {
-      data: JSON.stringify({
-        action: 'StopStream'
-      })
-    };
-
-    try {
-      const signedTx = await window.arweaveWallet.signTransaction(tx);
-      await message({
-        process: processId,
-        tags: [{ name: 'Action', value: 'StopStream' }],
-        data: signedTx
-      });
-    } catch (error) {
-      console.error('Error stopping stream:', error);
-    }
-  };
-
-  useEffect(() => {
-    fetchLiveStreams();
-  }, []);
-
   const fetchLiveStreams = async () => {
     try {
       const result = await dryrun({
         process: processId,
-        tags: [{ name: 'Action', value: 'GetLiveStreams' }]
+        tags: [{ name: 'Action', value: 'GetLiveStreams' }],
+        // Add CORS mode
+        mode: 'cors',
+        credentials: 'include'
       });
 
       if (result.Messages?.[0]?.Data) {
         const streams = JSON.parse(result.Messages[0].Data);
-        setChannels(streams.map((stream: any) => ({
+        const updatedChannels = streams.map((stream: any) => ({
           id: stream.channel_id,
           name: stream.channel_name,
           description: '',
           category: stream.category,
           stats: {
             subscriber_count: 0,
-            active_stream: {
+            active_stream: stream.is_active ? {
               id: stream.id,
               channel_id: stream.channel_id,
               title: stream.title,
               category: stream.category,
               viewer_count: stream.viewer_count,
               started_at: stream.started_at
-            }
+            } : null
           }
-        })));
+        }));
+        setChannels(updatedChannels);
       }
     } catch (error) {
       console.error('Error fetching live streams:', error);
+      // Don't throw error, just log it
     }
   };
+
+  // Add periodic stream check
+  useEffect(() => {
+    const interval = setInterval(fetchLiveStreams, 5000); // Check every 5 seconds
+    return () => clearInterval(interval);
+  }, []);
 
   const sendChatMessage = async () => {
     if (!activeStream || !newMessage.trim()) return;
@@ -330,6 +360,35 @@ export default function App() {
     }, 3000);
   };
 
+  const stopStreaming = async () => {
+    if (flvPlayerRef.current) {
+      flvPlayerRef.current.destroy();
+      flvPlayerRef.current = null;
+    }
+    setIsStreaming(false);
+
+    // Create transaction for stopping stream
+    const tx = {
+      data: JSON.stringify({
+        action: 'StopStream'
+      })
+    };
+
+    try {
+      const signedTx = await window.arweaveWallet.signTransaction(tx);
+      await message({
+        process: processId,
+        tags: [{ name: 'Action', value: 'StopStream' }],
+        data: signedTx
+      });
+      
+      // Refresh the streams list after stopping
+      await fetchLiveStreams();
+    } catch (error) {
+      console.error('Error stopping stream:', error);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-black text-white font-mono">
       <nav className="bg-black border-b border-white/10 p-4">
@@ -341,6 +400,12 @@ export default function App() {
                 <span className="text-sm bg-black text-white px-3 py-1 rounded border border-white/20">
                   {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
                 </span>
+                <button 
+                  onClick={disconnectWallet}
+                  className="bg-black text-white px-3 py-1 rounded font-mono transition-colors border border-white/20 hover:border-white/40"
+                >
+                  Disconnect
+                </button>
               </div>
             ) : (
               <button 
@@ -397,25 +462,13 @@ export default function App() {
                   placeholder="Enter category"
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-1 text-white/70 font-mono">Source</label>
-                <select
-                  value={streamSetup.source}
-                  onChange={(e) => setStreamSetup({...streamSetup, source: e.target.value as 'obs' | 'camera' | 'screen'})}
-                  className="w-full bg-black text-white rounded px-3 py-2 border border-white/20 focus:border-white focus:ring-1 focus:ring-white font-mono"
-                >
-                  <option value="camera">Camera</option>
-                  <option value="screen">Screen Share</option>
-                  <option value="obs">OBS Studio</option>
-                </select>
-              </div>
-              {streamSetup.source === 'obs' && streamSetup.rtmpKey && (
+              {streamSetup.rtmpKey && (
                 <div className="bg-black/50 p-4 rounded border border-white/20">
-                  <h3 className="text-sm font-mono mb-2">OBS Setup</h3>
+                  <h3 className="text-sm font-mono mb-2">Streaming Software Setup</h3>
                   <p className="text-xs text-white/70 font-mono mb-2">Server: {getRTMPUrl(streamSetup.rtmpKey)}</p>
                   <p className="text-xs text-white/70 font-mono">Stream Key: {streamSetup.rtmpKey}</p>
                   <div className="mt-2 text-xs text-white/50 font-mono">
-                    <p>1. Open OBS</p>
+                    <p>1. Open your streaming software (OBS, Streamlabs, etc.)</p>
                     <p>2. Go to Settings &gt; Stream</p>
                     <p>3. Set Service to 'Custom'</p>
                     <p>4. Enter the Server and Stream Key above</p>
@@ -442,21 +495,27 @@ export default function App() {
         </div>
       )}
 
-      {isStreaming && mediaStream && (
+      {isStreaming && (
         <div className="container mx-auto p-4">
           <div 
             className="relative bg-black rounded-lg overflow-hidden border border-white/20"
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setShowControls(false)}
           >
-            <video
-              ref={videoRef}
-              // @ts-ignore - srcObject is a valid property but TypeScript doesn't recognize it
-              srcObject={mediaStream}
-              autoPlay
-              muted={isMuted}
-              className="w-full"
-            />
+            {streamSetup.rtmpKey ? (
+              <video
+                ref={videoRef}
+                autoPlay
+                muted={isMuted}
+                className="w-full"
+                controls={false}
+                playsInline
+              />
+            ) : (
+              <div className="w-full aspect-video bg-black/50 flex items-center justify-center">
+                <p className="text-white/50">Waiting for stream to start...</p>
+              </div>
+            )}
             
             <div 
               className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent p-4 transition-opacity duration-300 ${
@@ -501,7 +560,7 @@ export default function App() {
                     </svg>
                   ) : (
                     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
                     </svg>
                   )}
                 </button>
